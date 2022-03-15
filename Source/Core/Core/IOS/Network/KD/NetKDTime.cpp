@@ -1,6 +1,5 @@
 // Copyright 2017 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/IOS/Network/KD/NetKDTime.h"
 
@@ -10,16 +9,26 @@
 #include "Core/HW/EXI/EXI_DeviceIPL.h"
 #include "Core/HW/Memmap.h"
 
-namespace IOS::HLE::Device
+namespace IOS::HLE
 {
-NetKDTime::NetKDTime(Kernel& ios, const std::string& device_name) : Device(ios, device_name)
+NetKDTimeDevice::NetKDTimeDevice(Kernel& ios, const std::string& device_name)
+    : Device(ios, device_name)
 {
 }
 
-NetKDTime::~NetKDTime() = default;
+NetKDTimeDevice::~NetKDTimeDevice() = default;
 
-IPCCommandResult NetKDTime::IOCtl(const IOCtlRequest& request)
+std::optional<IPCReply> NetKDTimeDevice::IOCtl(const IOCtlRequest& request)
 {
+  enum : u32
+  {
+    IOCTL_NW24_GET_UNIVERSAL_TIME = 0x14,
+    IOCTL_NW24_SET_UNIVERSAL_TIME = 0x15,
+    IOCTL_NW24_UNIMPLEMENTED = 0x16,
+    IOCTL_NW24_SET_RTC_COUNTER = 0x17,
+    IOCTL_NW24_GET_TIME_DIFF = 0x18,
+  };
+
   s32 result = 0;
   u32 common_result = 0;
   // TODO Writes stuff to /shared2/nwc24/misc.bin
@@ -65,24 +74,28 @@ IPCCommandResult NetKDTime::IOCtl(const IOCtlRequest& request)
     break;
 
   default:
-    request.DumpUnknown(GetDeviceName(), Common::Log::IOS_WC24);
+    request.DumpUnknown(GetDeviceName(), Common::Log::LogType::IOS_WC24);
     break;
   }
 
   // write return values
   Memory::Write_U32(common_result, request.buffer_out);
-  return GetDefaultReply(result);
+  return IPCReply(result);
 }
 
-u64 NetKDTime::GetAdjustedUTC() const
+u64 NetKDTimeDevice::GetAdjustedUTC() const
 {
-  return ExpansionInterface::CEXIIPL::GetEmulatedTime(ExpansionInterface::CEXIIPL::UNIX_EPOCH) +
-         utcdiff;
+  using namespace ExpansionInterface;
+
+  const u32 emulated_time = CEXIIPL::GetEmulatedTime(CEXIIPL::UNIX_EPOCH);
+  return u64(s64(emulated_time) + utcdiff);
 }
 
-void NetKDTime::SetAdjustedUTC(u64 wii_utc)
+void NetKDTimeDevice::SetAdjustedUTC(u64 wii_utc)
 {
-  utcdiff = ExpansionInterface::CEXIIPL::GetEmulatedTime(ExpansionInterface::CEXIIPL::UNIX_EPOCH) -
-            wii_utc;
+  using namespace ExpansionInterface;
+
+  const u32 emulated_time = CEXIIPL::GetEmulatedTime(CEXIIPL::UNIX_EPOCH);
+  utcdiff = s64(emulated_time - wii_utc);
 }
-}  // namespace IOS::HLE::Device
+}  // namespace IOS::HLE

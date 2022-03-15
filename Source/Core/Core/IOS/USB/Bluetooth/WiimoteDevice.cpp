@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/IOS/USB/Bluetooth/WiimoteDevice.h"
 
@@ -55,7 +54,7 @@ private:
 
 constexpr int CONNECTION_MESSAGE_TIME = 3000;
 
-WiimoteDevice::WiimoteDevice(Device::BluetoothEmu* host, int number, bdaddr_t bd)
+WiimoteDevice::WiimoteDevice(BluetoothEmuDevice* host, int number, bdaddr_t bd)
     : m_host(host), m_bd(bd),
       m_name(number == WIIMOTE_BALANCE_BOARD ? "Nintendo RVL-WBC-01" : "Nintendo RVL-CNT-01")
 
@@ -213,13 +212,12 @@ bool WiimoteDevice::IsConnected() const
 
 void WiimoteDevice::Activate(bool connect)
 {
-  const char* message = nullptr;
-
   if (connect && m_baseband_state == BasebandState::Inactive)
   {
     SetBasebandState(BasebandState::RequestConnection);
 
-    message = "Wii Remote {} connected";
+    Core::DisplayMessage(fmt::format("Wii Remote {} connected", GetNumber() + 1),
+                         CONNECTION_MESSAGE_TIME);
   }
   else if (!connect && IsConnected())
   {
@@ -229,11 +227,9 @@ void WiimoteDevice::Activate(bool connect)
     // Not doing that doesn't seem to break anything.
     m_host->RemoteDisconnect(GetBD());
 
-    message = "Wii Remote {} disconnected";
+    Core::DisplayMessage(fmt::format("Wii Remote {} disconnected", GetNumber() + 1),
+                         CONNECTION_MESSAGE_TIME);
   }
-
-  if (message)
-    Core::DisplayMessage(fmt::format(message, GetNumber() + 1), CONNECTION_MESSAGE_TIME);
 }
 
 bool WiimoteDevice::EventConnectionRequest()
@@ -725,11 +721,11 @@ void WiimoteDevice::SendConfigurationRequest(u16 cid, u16 mtu, u16 flush_time_ou
   SendCommandToACL(L2CAP_CONFIG_REQ, L2CAP_CONFIG_REQ, offset, buffer);
 }
 
-constexpr u8 SDP_UINT8 = 0x08;
-constexpr u8 SDP_UINT16 = 0x09;
+[[maybe_unused]] constexpr u8 SDP_UINT8 = 0x08;
+[[maybe_unused]] constexpr u8 SDP_UINT16 = 0x09;
 constexpr u8 SDP_UINT32 = 0x0A;
 constexpr u8 SDP_SEQ8 = 0x35;
-constexpr u8 SDP_SEQ16 = 0x36;
+[[maybe_unused]] constexpr u8 SDP_SEQ16 = 0x36;
 
 void WiimoteDevice::SDPSendServiceSearchResponse(u16 cid, u16 transaction_id,
                                                  u8* service_search_pattern,
@@ -800,16 +796,12 @@ static int ParseAttribList(u8* attrib_id_list, u16& start_id, u16& end_id)
 
   const u8 sequence = attrib_list.Read8(attrib_offset);
   attrib_offset++;
-  const u8 seq_size = attrib_list.Read8(attrib_offset);
+  [[maybe_unused]] const u8 seq_size = attrib_list.Read8(attrib_offset);
   attrib_offset++;
   const u8 type_id = attrib_list.Read8(attrib_offset);
   attrib_offset++;
 
-  if constexpr (MAX_LOGLEVEL >= Common::Log::LOG_LEVELS::LDEBUG)
-  {
-    DEBUG_ASSERT(sequence == SDP_SEQ8);
-    (void)seq_size;
-  }
+  DEBUG_ASSERT(sequence == SDP_SEQ8);
 
   if (type_id == SDP_UINT32)
   {

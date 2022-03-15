@@ -1,12 +1,10 @@
 // Copyright 2017 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/IOS/IOSC.h"
 
 #include <algorithm>
 #include <array>
-#include <cinttypes>
 #include <cstddef>
 #include <cstring>
 #include <map>
@@ -22,8 +20,8 @@
 #include "Common/ChunkFile.h"
 #include "Common/Crypto/AES.h"
 #include "Common/Crypto/ec.h"
-#include "Common/File.h"
 #include "Common/FileUtil.h"
+#include "Common/IOFile.h"
 #include "Common/ScopeGuard.h"
 #include "Common/Swap.h"
 #include "Core/IOS/Device.h"
@@ -346,7 +344,7 @@ ReturnCode IOSC::VerifyPublicKeySign(const std::array<u8, 20>& sha1, Handle sign
   }
 }
 
-ReturnCode IOSC::ImportCertificate(const IOS::ES::CertReader& cert, Handle signer_handle,
+ReturnCode IOSC::ImportCertificate(const ES::CertReader& cert, Handle signer_handle,
                                    Handle dest_handle, u32 pid)
 {
   if (!HasOwnership(signer_handle, pid) || !HasOwnership(dest_handle, pid))
@@ -558,7 +556,7 @@ void IOSC::LoadDefaultEntries(ConsoleType console_type)
 
 void IOSC::LoadEntries()
 {
-  File::IOFile file{File::GetUserPath(D_WIIROOT_IDX) + "/keys.bin", "rb"};
+  File::IOFile file{File::GetUserPath(D_WIIROOT_IDX) + "keys.bin", "rb"};
   if (!file)
   {
     WARN_LOG_FMT(IOS, "keys.bin could not be found. Default values will be used.");

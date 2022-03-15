@@ -1,6 +1,5 @@
 // Copyright 2018 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "DiscIO/WIABlob.h"
 
@@ -22,15 +21,15 @@
 #include "Common/Align.h"
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
-#include "Common/File.h"
 #include "Common/FileUtil.h"
+#include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 #include "Common/ScopeGuard.h"
 #include "Common/Swap.h"
 
 #include "DiscIO/Blob.h"
-#include "DiscIO/DiscExtractor.h"
+#include "DiscIO/DiscUtils.h"
 #include "DiscIO/Filesystem.h"
 #include "DiscIO/LaggedFibonacciGenerator.h"
 #include "DiscIO/MultithreadedCompressor.h"
@@ -88,7 +87,7 @@ WIARVZFileReader<RVZ>::~WIARVZFileReader() = default;
 template <bool RVZ>
 bool WIARVZFileReader<RVZ>::Initialize(const std::string& path)
 {
-  if (!m_file.Seek(0, SEEK_SET) || !m_file.ReadArray(&m_header_1, 1))
+  if (!m_file.Seek(0, File::SeekOrigin::Begin) || !m_file.ReadArray(&m_header_1, 1))
     return false;
 
   if ((!RVZ && m_header_1.magic != WIA_MAGIC) || (RVZ && m_header_1.magic != RVZ_MAGIC))
@@ -161,7 +160,7 @@ bool WIARVZFileReader<RVZ>::Initialize(const std::string& path)
   const size_t number_of_partition_entries = Common::swap32(m_header_2.number_of_partition_entries);
   const size_t partition_entry_size = Common::swap32(m_header_2.partition_entry_size);
   std::vector<u8> partition_entries(partition_entry_size * number_of_partition_entries);
-  if (!m_file.Seek(Common::swap64(m_header_2.partition_entries_offset), SEEK_SET))
+  if (!m_file.Seek(Common::swap64(m_header_2.partition_entries_offset), File::SeekOrigin::Begin))
     return false;
   if (!m_file.ReadBytes(partition_entries.data(), partition_entries.size()))
     return false;
@@ -653,7 +652,7 @@ bool WIARVZFileReader<RVZ>::Chunk::Read(u64 offset, u64 size, u8* out_ptr)
     return false;
   }
 
-  while (offset + size > m_out.bytes_written - m_out_bytes_used_for_exceptions)
+  while (offset + size > GetOutBytesWrittenExcludingExceptions())
   {
     u64 bytes_to_read;
     if (offset + size == m_out.data.size())
@@ -663,13 +662,13 @@ bool WIARVZFileReader<RVZ>::Chunk::Read(u64 offset, u64 size, u8* out_ptr)
     }
     else
     {
-      // Pick a suitable amount of compressed data to read. The std::min line has to
-      // be as it is, but the rest is a bit arbitrary and can be changed if desired.
+      // Pick a suitable amount of compressed data to read. We have to ensure that bytes_to_read
+      // is larger than 0 and smaller than or equal to the number of bytes available to read,
+      // but the rest is a bit arbitrary and could be changed.
 
       // The compressed data is probably not much bigger than the decompressed data.
       // Add a few bytes for possible compression overhead and for any hash exceptions.
-      bytes_to_read =
-          offset + size - (m_out.bytes_written - m_out_bytes_used_for_exceptions) + 0x100;
+      bytes_to_read = offset + size - GetOutBytesWrittenExcludingExceptions() + 0x100;
 
       // Align the access in an attempt to gain speed. But we don't actually know the
       // block size of the underlying storage device, so we just use the Wii block size.
@@ -687,7 +686,7 @@ bool WIARVZFileReader<RVZ>::Chunk::Read(u64 offset, u64 size, u8* out_ptr)
       return false;
     }
 
-    if (!m_file->Seek(m_offset_in_file, SEEK_SET))
+    if (!m_file->Seek(m_offset_in_file, File::SeekOrigin::Begin))
       return false;
     if (!m_file->ReadBytes(m_in.data.data() + m_in.bytes_written, bytes_to_read))
       return false;
@@ -837,6 +836,12 @@ void WIARVZFileReader<RVZ>::Chunk::GetHashExceptions(
 
   ASSERT(data <= data_start + (m_compressed_exception_lists ? m_out_bytes_used_for_exceptions :
                                                               m_in_bytes_used_for_exceptions));
+}
+
+template <bool RVZ>
+size_t WIARVZFileReader<RVZ>::Chunk::GetOutBytesWrittenExcludingExceptions() const
+{
+  return m_exception_lists == 0 ? m_out.bytes_written - m_out_bytes_used_for_exceptions : 0;
 }
 
 template <bool RVZ>
@@ -1299,7 +1304,7 @@ WIARVZFileReader<RVZ>::ProcessAndCompress(CompressThreadState* state, CompressPa
     std::vector<u8>& data = parameters.data;
 
     if (AllSame(data))
-      entry.reuse_id = ReuseID{nullptr, data.size(), false, data.front()};
+      entry.reuse_id = ReuseID{WiiKey{}, data.size(), false, data.front()};
 
     if constexpr (RVZ)
     {
@@ -1338,7 +1343,7 @@ WIARVZFileReader<RVZ>::ProcessAndCompress(CompressThreadState* state, CompressPa
     const auto create_reuse_id = [&partition_entry, blocks,
                                   blocks_per_chunk](u8 value, bool encrypted, u64 block) {
       const u64 size = std::min(blocks - block, blocks_per_chunk) * VolumeWii::BLOCK_DATA_SIZE;
-      return ReuseID{&partition_entry.partition_key, size, encrypted, value};
+      return ReuseID{partition_entry.partition_key, size, encrypted, value};
     };
 
     const u8* parameters_data_end = parameters.data.data() + parameters.data.size();
@@ -1452,8 +1457,8 @@ WIARVZFileReader<RVZ>::ProcessAndCompress(CompressThreadState* state, CompressPa
           compare_hashes(offsetof(HashBlock, padding_2), sizeof(HashBlock::padding_2));
         }
 
-        static_assert(std::is_trivially_copyable_v<typename decltype(
-                          CompressThreadState::decryption_buffer)::value_type>);
+        static_assert(std::is_trivially_copyable_v<
+                      typename decltype(CompressThreadState::decryption_buffer)::value_type>);
         if constexpr (RVZ)
         {
           // We must not store junk efficiently for chunks that may get reused at a position
@@ -1711,7 +1716,7 @@ bool WIARVZFileReader<RVZ>::WriteHeader(File::IOFile* file, const u8* data, size
   {
     WARN_LOG_FMT(DISCIO,
                  "Headers did not fit in the allocated space. Writing to end of file instead");
-    if (!file->Seek(0, SEEK_END))
+    if (!file->Seek(0, File::SeekOrigin::End))
       return false;
     *bytes_written = file->Tell();
   }
@@ -1944,7 +1949,7 @@ WIARVZFileReader<RVZ>::Convert(BlobReader* infile, const VolumeDisc* infile_volu
     return ConversionResultCode::InternalError;
 
   bytes_written = sizeof(WIAHeader1) + sizeof(WIAHeader2);
-  if (!outfile->Seek(sizeof(WIAHeader1) + sizeof(WIAHeader2), SEEK_SET))
+  if (!outfile->Seek(sizeof(WIAHeader1) + sizeof(WIAHeader2), File::SeekOrigin::Begin))
     return ConversionResultCode::WriteFailed;
 
   u64 partition_entries_offset;
@@ -2013,7 +2018,7 @@ WIARVZFileReader<RVZ>::Convert(BlobReader* infile, const VolumeDisc* infile_volu
   mbedtls_sha1_ret(reinterpret_cast<const u8*>(&header_1), offsetof(WIAHeader1, header_1_hash),
                    header_1.header_1_hash.data());
 
-  if (!outfile->Seek(0, SEEK_SET))
+  if (!outfile->Seek(0, File::SeekOrigin::Begin))
     return ConversionResultCode::WriteFailed;
 
   if (!outfile->WriteArray(&header_1, 1))

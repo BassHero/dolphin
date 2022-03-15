@@ -1,11 +1,9 @@
 // Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/PowerPC/JitInterface.h"
 
 #include <algorithm>
-#include <cinttypes>
 #include <cstdio>
 #include <string>
 #include <unordered_set>
@@ -20,7 +18,7 @@
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
-#include "Common/File.h"
+#include "Common/IOFile.h"
 #include "Common/MsgHandler.h"
 
 #include "Core/Core.h"
@@ -71,9 +69,8 @@ CPUCoreBase* InitJitCore(PowerPC::CPUCore core)
     break;
 
   default:
-    PanicAlertFmtT("The selected CPU emulation core ({0}) is not available. "
-                   "Please select a different CPU emulation core in the settings.",
-                   core);
+    // Under this case the caller overrides the CPU core to the default and logs that
+    // it performed the override.
     g_jit = nullptr;
     return nullptr;
   }
@@ -131,26 +128,22 @@ void GetProfileResults(Profiler::ProfileStats* prof_stats)
   prof_stats->timecost_sum = 0;
   prof_stats->block_stats.clear();
 
-  Core::State old_state = Core::GetState();
-  if (old_state == Core::State::Running)
-    Core::SetState(Core::State::Paused);
+  Core::RunAsCPUThread([&prof_stats] {
+    QueryPerformanceFrequency((LARGE_INTEGER*)&prof_stats->countsPerSec);
+    g_jit->GetBlockCache()->RunOnBlocks([&prof_stats](const JitBlock& block) {
+      const auto& data = block.profile_data;
+      u64 cost = data.downcountCounter;
+      u64 timecost = data.ticCounter;
+      // Todo: tweak.
+      if (data.runCount >= 1)
+        prof_stats->block_stats.emplace_back(block.effectiveAddress, cost, timecost, data.runCount,
+                                             block.codeSize);
+      prof_stats->cost_sum += cost;
+      prof_stats->timecost_sum += timecost;
+    });
 
-  QueryPerformanceFrequency((LARGE_INTEGER*)&prof_stats->countsPerSec);
-  g_jit->GetBlockCache()->RunOnBlocks([&prof_stats](const JitBlock& block) {
-    const auto& data = block.profile_data;
-    u64 cost = data.downcountCounter;
-    u64 timecost = data.ticCounter;
-    // Todo: tweak.
-    if (data.runCount >= 1)
-      prof_stats->block_stats.emplace_back(block.effectiveAddress, cost, timecost, data.runCount,
-                                           block.codeSize);
-    prof_stats->cost_sum += cost;
-    prof_stats->timecost_sum += timecost;
+    sort(prof_stats->block_stats.begin(), prof_stats->block_stats.end());
   });
-
-  sort(prof_stats->block_stats.begin(), prof_stats->block_stats.end());
-  if (old_state == Core::State::Running)
-    Core::SetState(Core::State::Running);
 }
 
 int GetHostCode(u32* address, const u8** code, u32* code_size)
@@ -228,6 +221,28 @@ void InvalidateICache(u32 address, u32 size, bool forced)
 {
   if (g_jit)
     g_jit->GetBlockCache()->InvalidateICache(address, size, forced);
+}
+
+void InvalidateICacheLine(u32 address)
+{
+  if (g_jit)
+    g_jit->GetBlockCache()->InvalidateICacheLine(address);
+}
+
+void InvalidateICacheLines(u32 address, u32 count)
+{
+  // This corresponds to a PPC code loop that:
+  // - calls some form of dcb* instruction on 'address'
+  // - increments 'address' by the size of a cache line (0x20 bytes)
+  // - decrements 'count' by 1
+  // - jumps back to the dcb* instruction if 'count' != 0
+  // with an extra optimization for the case of a single cache line invalidation
+  if (count == 1)
+    InvalidateICacheLine(address);
+  else if (count == 0 || count >= static_cast<u32>(0x1'0000'0000 / 32))
+    InvalidateICache(address & ~0x1f, 0xffffffff, false);
+  else
+    InvalidateICache(address & ~0x1f, 32 * count, false);
 }
 
 void CompileExceptionCheck(ExceptionType type)

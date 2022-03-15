@@ -1,17 +1,15 @@
 // Copyright 2016 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/IOS/WFS/WFSSRV.h"
 
 #include <algorithm>
-#include <cinttypes>
 #include <string>
 #include <vector>
 
 #include "Common/CommonTypes.h"
-#include "Common/File.h"
 #include "Common/FileUtil.h"
+#include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/NandPaths.h"
 #include "Core/HW/Memmap.h"
@@ -26,14 +24,12 @@ std::string NativePath(const std::string& wfs_path)
 }
 }  // namespace WFS
 
-namespace Device
-{
-WFSSRV::WFSSRV(Kernel& ios, const std::string& device_name) : Device(ios, device_name)
+WFSSRVDevice::WFSSRVDevice(Kernel& ios, const std::string& device_name) : Device(ios, device_name)
 {
   m_device_name = "msc01";
 }
 
-IPCCommandResult WFSSRV::IOCtl(const IOCtlRequest& request)
+std::optional<IPCReply> WFSSRVDevice::IOCtl(const IOCtlRequest& request)
 {
   int return_error_code = IPC_SUCCESS;
 
@@ -92,7 +88,7 @@ IPCCommandResult WFSSRV::IOCtl(const IOCtlRequest& request)
 
     // Leave hanging, but we need to acknowledge the request at shutdown time.
     m_hanging.push_back(request.address);
-    return GetNoReply();
+    return std::nullopt;
 
   case IOCTL_WFS_FLUSH:
     // Nothing to do.
@@ -294,14 +290,14 @@ IPCCommandResult WFSSRV::IOCtl(const IOCtlRequest& request)
     const u64 previous_position = fd_obj->file.Tell();
     if (absolute)
     {
-      fd_obj->file.Seek(position, SEEK_SET);
+      fd_obj->file.Seek(position, File::SeekOrigin::Begin);
     }
     size_t read_bytes;
     fd_obj->file.ReadArray(Memory::GetPointer(addr), size, &read_bytes);
     // TODO(wfs): Handle read errors.
     if (absolute)
     {
-      fd_obj->file.Seek(previous_position, SEEK_SET);
+      fd_obj->file.Seek(previous_position, File::SeekOrigin::Begin);
     }
     else
     {
@@ -335,13 +331,13 @@ IPCCommandResult WFSSRV::IOCtl(const IOCtlRequest& request)
     const u64 previous_position = fd_obj->file.Tell();
     if (absolute)
     {
-      fd_obj->file.Seek(position, SEEK_SET);
+      fd_obj->file.Seek(position, File::SeekOrigin::Begin);
     }
     fd_obj->file.WriteArray(Memory::GetPointer(addr), size);
     // TODO(wfs): Handle write errors.
     if (absolute)
     {
-      fd_obj->file.Seek(previous_position, SEEK_SET);
+      fd_obj->file.Seek(previous_position, File::SeekOrigin::Begin);
     }
     else
     {
@@ -356,15 +352,16 @@ IPCCommandResult WFSSRV::IOCtl(const IOCtlRequest& request)
   default:
     // TODO(wfs): Should be returning -3. However until we have everything
     // properly stubbed it's easier to simulate the methods succeeding.
-    request.DumpUnknown(GetDeviceName(), Common::Log::IOS, Common::Log::LWARNING);
+    request.DumpUnknown(GetDeviceName(), Common::Log::LogType::IOS_WFS,
+                        Common::Log::LogLevel::LWARNING);
     Memory::Memset(request.buffer_out, 0, request.buffer_out_size);
     break;
   }
 
-  return GetDefaultReply(return_error_code);
+  return IPCReply(return_error_code);
 }
 
-s32 WFSSRV::Rename(std::string source, std::string dest) const
+s32 WFSSRVDevice::Rename(std::string source, std::string dest) const
 {
   source = NormalizePath(source);
   dest = NormalizePath(dest);
@@ -384,12 +381,12 @@ s32 WFSSRV::Rename(std::string source, std::string dest) const
   return IPC_SUCCESS;
 }
 
-void WFSSRV::SetHomeDir(const std::string& home_directory)
+void WFSSRVDevice::SetHomeDir(const std::string& home_directory)
 {
   m_home_directory = home_directory;
 }
 
-std::string WFSSRV::NormalizePath(const std::string& path) const
+std::string WFSSRVDevice::NormalizePath(const std::string& path) const
 {
   std::string expanded;
   if (!path.empty() && path[0] == '~')
@@ -425,7 +422,7 @@ std::string WFSSRV::NormalizePath(const std::string& path) const
   return "/" + JoinStrings(normalized_components, "/");
 }
 
-WFSSRV::FileDescriptor* WFSSRV::FindFileDescriptor(u16 fd)
+WFSSRVDevice::FileDescriptor* WFSSRVDevice::FindFileDescriptor(u16 fd)
 {
   if (fd >= m_fds.size() || !m_fds[fd].in_use)
   {
@@ -434,7 +431,7 @@ WFSSRV::FileDescriptor* WFSSRV::FindFileDescriptor(u16 fd)
   return &m_fds[fd];
 }
 
-u16 WFSSRV::GetNewFileDescriptor()
+u16 WFSSRVDevice::GetNewFileDescriptor()
 {
   for (u32 i = 0; i < m_fds.size(); ++i)
   {
@@ -447,7 +444,7 @@ u16 WFSSRV::GetNewFileDescriptor()
   return static_cast<u16>(m_fds.size() - 1);
 }
 
-void WFSSRV::ReleaseFileDescriptor(u16 fd)
+void WFSSRVDevice::ReleaseFileDescriptor(u16 fd)
 {
   FileDescriptor* fd_obj = FindFileDescriptor(fd);
   if (!fd_obj)
@@ -463,7 +460,7 @@ void WFSSRV::ReleaseFileDescriptor(u16 fd)
   }
 }
 
-bool WFSSRV::FileDescriptor::Open()
+bool WFSSRVDevice::FileDescriptor::Open()
 {
   const char* mode_string;
 
@@ -487,5 +484,4 @@ bool WFSSRV::FileDescriptor::Open()
 
   return file.Open(WFS::NativePath(path), mode_string);
 }
-}  // namespace Device
 }  // namespace IOS::HLE

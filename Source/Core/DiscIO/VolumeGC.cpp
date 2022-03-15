@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "DiscIO/VolumeGC.h"
 
@@ -23,6 +22,7 @@
 
 #include "DiscIO/Blob.h"
 #include "DiscIO/DiscExtractor.h"
+#include "DiscIO/DiscUtils.h"
 #include "DiscIO/Enums.h"
 #include "DiscIO/FileSystemGCWii.h"
 #include "DiscIO/Filesystem.h"
@@ -136,7 +136,7 @@ Platform VolumeGC::GetVolumeType() const
 
 bool VolumeGC::IsDatelDisc() const
 {
-  return !GetBootDOLOffset(*this, PARTITION_NONE).has_value();
+  return GetGameID() == "DTLX01" || !GetBootDOLOffset(*this, PARTITION_NONE).has_value();
 }
 
 std::array<u8, 20> VolumeGC::GetSyncHash() const

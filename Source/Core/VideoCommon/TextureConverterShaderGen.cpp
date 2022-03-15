@@ -1,6 +1,5 @@
 // Copyright 2017 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoCommon/TextureConverterShaderGen.h"
 
@@ -19,7 +18,7 @@ TCShaderUid GetShaderUid(EFBCopyFormat dst_format, bool is_depth_copy, bool is_i
 
   UidData* const uid_data = out.GetUidData();
   uid_data->dst_format = dst_format;
-  uid_data->efb_has_alpha = bpmem.zcontrol.pixel_format == PEControl::RGBA6_Z24;
+  uid_data->efb_has_alpha = bpmem.zcontrol.pixel_format == PixelFormat::RGBA6_Z24;
   uid_data->is_depth_copy = is_depth_copy;
   uid_data->is_intensity = is_intensity;
   uid_data->scale_by_half = scale_by_half;
@@ -128,7 +127,7 @@ ShaderCode GeneratePixelShader(APIType api_type, const UidData* uid_data)
     {
       out.Write("VARYING_LOCATION(0) in vec3 v_tex0;\n");
     }
-    out.Write("FRAGMENT_OUTPUT_LOCATION(0) out vec4 ocol0;"
+    out.Write("FRAGMENT_OUTPUT_LOCATION(0) out vec4 ocol0;\n"
               "void main()\n{{\n");
   }
 
@@ -217,6 +216,9 @@ ShaderCode GeneratePixelShader(APIType api_type, const UidData* uid_data)
   }
   else if (uid_data->is_intensity)
   {
+    if (!uid_data->efb_has_alpha)
+      out.Write("  texcol.a = 1.0;\n");
+
     bool has_four_bits =
         (uid_data->dst_format == EFBCopyFormat::R4 || uid_data->dst_format == EFBCopyFormat::RA4);
     bool has_alpha =

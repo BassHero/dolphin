@@ -1,6 +1,7 @@
 // Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "Common/CPUDetect.h"
 
 #include <cstring>
 #include <fstream>
@@ -8,7 +9,7 @@
 #include <string>
 #include <thread>
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 #ifndef __FreeBSD__
 #include <asm/hwcap.h>
 #endif
@@ -18,7 +19,6 @@
 
 #include <fmt/format.h>
 
-#include "Common/CPUDetect.h"
 #include "Common/CommonTypes.h"
 #include "Common/FileUtil.h"
 
@@ -63,14 +63,26 @@ CPUInfo::CPUInfo()
 void CPUInfo::Detect()
 {
   // Set some defaults here
-  // When ARMv8 CPUs come out, these need to be updated.
   HTT = false;
   OS64bit = true;
   CPU64bit = true;
   Mode64bit = true;
   vendor = CPUVendor::ARM;
+  bFMA = true;
+  bFlushToZero = true;
+  bAFP = false;
 
-#ifdef _WIN32
+#ifdef __APPLE__
+  num_cores = std::thread::hardware_concurrency();
+
+  // M-series CPUs have all of these
+  bFP = true;
+  bASIMD = true;
+  bAES = true;
+  bSHA1 = true;
+  bSHA2 = true;
+  bCRC32 = true;
+#elif defined(_WIN32)
   num_cores = std::thread::hardware_concurrency();
 
   // Windows does not provide any mechanism for querying the system registers on ARMv8, unlike Linux

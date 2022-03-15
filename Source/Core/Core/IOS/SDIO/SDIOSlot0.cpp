@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/IOS/SDIO/SDIOSlot0.h"
 
@@ -11,26 +10,51 @@
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
-#include "Common/File.h"
 #include "Common/FileUtil.h"
+#include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/SDCardUtil.h"
+
 #include "Core/Config/MainSettings.h"
-#include "Core/ConfigManager.h"
+#include "Core/Config/SessionSettings.h"
+#include "Core/Core.h"
 #include "Core/HW/Memmap.h"
 #include "Core/IOS/IOS.h"
 #include "Core/IOS/VersionInfo.h"
 
-namespace IOS::HLE::Device
+namespace IOS::HLE
 {
-SDIOSlot0::SDIOSlot0(Kernel& ios, const std::string& device_name)
+SDIOSlot0Device::SDIOSlot0Device(Kernel& ios, const std::string& device_name)
     : Device(ios, device_name), m_sdhc_supported(HasFeature(ios.GetVersion(), Feature::SDv2))
 {
   if (!Config::Get(Config::MAIN_ALLOW_SD_WRITES))
     INFO_LOG_FMT(IOS_SD, "Writes to SD card disabled by user");
+
+  m_config_callback_id = Config::AddConfigChangedCallback([this] { RefreshConfig(); });
+  m_sd_card_inserted = Config::Get(Config::MAIN_WII_SD_CARD);
 }
 
-void SDIOSlot0::DoState(PointerWrap& p)
+SDIOSlot0Device::~SDIOSlot0Device()
+{
+  Config::RemoveConfigChangedCallback(m_config_callback_id);
+}
+
+void SDIOSlot0Device::RefreshConfig()
+{
+  if (m_sd_card_inserted != Config::Get(Config::MAIN_WII_SD_CARD))
+  {
+    Core::RunAsCPUThread([this] {
+      const bool sd_card_inserted = Config::Get(Config::MAIN_WII_SD_CARD);
+      if (m_sd_card_inserted != sd_card_inserted)
+      {
+        m_sd_card_inserted = sd_card_inserted;
+        EventNotify();
+      }
+    });
+  }
+}
+
+void SDIOSlot0Device::DoState(PointerWrap& p)
 {
   DoStateShared(p);
   if (p.GetMode() == PointerWrap::MODE_READ)
@@ -45,21 +69,25 @@ void SDIOSlot0::DoState(PointerWrap& p)
   p.Do(m_sdhc_supported);
 }
 
-void SDIOSlot0::EventNotify()
+void SDIOSlot0Device::EventNotify()
 {
   if (!m_event)
     return;
-  // Accessing SConfig variables like this isn't really threadsafe,
-  // but this is how it's done all over the place...
-  if ((SConfig::GetInstance().m_WiiSDCard && m_event->type == EVENT_INSERT) ||
-      (!SConfig::GetInstance().m_WiiSDCard && m_event->type == EVENT_REMOVE))
+
+  if ((m_sd_card_inserted && m_event->type == EVENT_INSERT) ||
+      (!m_sd_card_inserted && m_event->type == EVENT_REMOVE))
   {
+    if (m_sd_card_inserted)
+      INFO_LOG_FMT(IOS_SD, "Notifying PPC of SD card insertion");
+    else
+      INFO_LOG_FMT(IOS_SD, "Notifying PPC of SD card removal");
+
     m_ios.EnqueueIPCReply(m_event->request, m_event->type);
     m_event.reset();
   }
 }
 
-void SDIOSlot0::OpenInternal()
+void SDIOSlot0Device::OpenInternal()
 {
   const std::string filename = File::GetUserPath(F_WIISDCARD_IDX);
   m_card.Open(filename, "r+b");
@@ -79,17 +107,17 @@ void SDIOSlot0::OpenInternal()
   }
 }
 
-IPCCommandResult SDIOSlot0::Open(const OpenRequest& request)
+std::optional<IPCReply> SDIOSlot0Device::Open(const OpenRequest& request)
 {
   OpenInternal();
   m_registers.fill(0);
 
   m_is_active = true;
 
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
-IPCCommandResult SDIOSlot0::Close(u32 fd)
+std::optional<IPCReply> SDIOSlot0Device::Close(u32 fd)
 {
   m_card.Close();
   m_block_length = 0;
@@ -98,7 +126,7 @@ IPCCommandResult SDIOSlot0::Close(u32 fd)
   return Device::Close(fd);
 }
 
-IPCCommandResult SDIOSlot0::IOCtl(const IOCtlRequest& request)
+std::optional<IPCReply> SDIOSlot0Device::IOCtl(const IOCtlRequest& request)
 {
   Memory::Memset(request.buffer_out, 0, request.buffer_out_size);
 
@@ -123,10 +151,10 @@ IPCCommandResult SDIOSlot0::IOCtl(const IOCtlRequest& request)
     break;
   }
 
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
-IPCCommandResult SDIOSlot0::IOCtlV(const IOCtlVRequest& request)
+std::optional<IPCReply> SDIOSlot0Device::IOCtlV(const IOCtlVRequest& request)
 {
   switch (request.request)
   {
@@ -137,16 +165,16 @@ IPCCommandResult SDIOSlot0::IOCtlV(const IOCtlVRequest& request)
     break;
   }
 
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
-s32 SDIOSlot0::ExecuteCommand(const Request& request, u32 buffer_in, u32 buffer_in_size,
-                              u32 rw_buffer, u32 rw_buffer_size, u32 buffer_out,
-                              u32 buffer_out_size)
+s32 SDIOSlot0Device::ExecuteCommand(const Request& request, u32 buffer_in, u32 buffer_in_size,
+                                    u32 rw_buffer, u32 rw_buffer_size, u32 buffer_out,
+                                    u32 buffer_out_size)
 {
   // The game will send us a SendCMD with this information. To be able to read and write
   // to a file we need to prepare a 0x10 byte output buffer as response.
-  struct Request
+  struct
   {
     u32 command;
     u32 type;
@@ -252,8 +280,8 @@ s32 SDIOSlot0::ExecuteCommand(const Request& request, u32 buffer_in, u32 buffer_
       const u32 size = req.bsize * req.blocks;
       const u64 address = GetAddressFromRequest(req.arg);
 
-      if (!m_card.Seek(address, SEEK_SET))
-        ERROR_LOG_FMT(IOS_SD, "Seek failed WTF");
+      if (!m_card.Seek(address, File::SeekOrigin::Begin))
+        ERROR_LOG_FMT(IOS_SD, "Seek failed");
 
       if (m_card.ReadBytes(Memory::GetPointer(req.addr), size))
       {
@@ -277,14 +305,13 @@ s32 SDIOSlot0::ExecuteCommand(const Request& request, u32 buffer_in, u32 buffer_
     INFO_LOG_FMT(IOS_SD, "{}Write {} Block(s) from {:#010x} bsize {} to offset {:#010x}!",
                  req.isDMA ? "DMA " : "", req.blocks, req.addr, req.bsize, req.arg);
 
-    if (m_card && SConfig::GetInstance().bEnableMemcardSdWriting &&
-        Config::Get(Config::MAIN_ALLOW_SD_WRITES))
+    if (m_card && Config::Get(Config::MAIN_ALLOW_SD_WRITES))
     {
       const u32 size = req.bsize * req.blocks;
       const u64 address = GetAddressFromRequest(req.arg);
 
-      if (!m_card.Seek(address, SEEK_SET))
-        ERROR_LOG_FMT(IOS_SD, "fseeko failed WTF");
+      if (!m_card.Seek(address, File::SeekOrigin::Begin))
+        ERROR_LOG_FMT(IOS_SD, "Seek failed");
 
       if (!m_card.WriteBytes(Memory::GetPointer(req.addr), size))
       {
@@ -325,7 +352,7 @@ s32 SDIOSlot0::ExecuteCommand(const Request& request, u32 buffer_in, u32 buffer_
   return ret;
 }
 
-IPCCommandResult SDIOSlot0::WriteHCRegister(const IOCtlRequest& request)
+IPCReply SDIOSlot0Device::WriteHCRegister(const IOCtlRequest& request)
 {
   const u32 reg = Memory::Read_U32(request.buffer_in);
   const u32 val = Memory::Read_U32(request.buffer_in + 16);
@@ -335,7 +362,7 @@ IPCCommandResult SDIOSlot0::WriteHCRegister(const IOCtlRequest& request)
   if (reg >= m_registers.size())
   {
     WARN_LOG_FMT(IOS_SD, "IOCTL_WRITEHCR out of range");
-    return GetDefaultReply(IPC_SUCCESS);
+    return IPCReply(IPC_SUCCESS);
   }
 
   if ((reg == HCR_CLOCKCONTROL) && (val & 1))
@@ -354,17 +381,17 @@ IPCCommandResult SDIOSlot0::WriteHCRegister(const IOCtlRequest& request)
     m_registers[reg] = val;
   }
 
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
-IPCCommandResult SDIOSlot0::ReadHCRegister(const IOCtlRequest& request)
+IPCReply SDIOSlot0Device::ReadHCRegister(const IOCtlRequest& request)
 {
   const u32 reg = Memory::Read_U32(request.buffer_in);
 
   if (reg >= m_registers.size())
   {
     WARN_LOG_FMT(IOS_SD, "IOCTL_READHCR out of range");
-    return GetDefaultReply(IPC_SUCCESS);
+    return IPCReply(IPC_SUCCESS);
   }
 
   const u32 val = m_registers[reg];
@@ -372,20 +399,20 @@ IPCCommandResult SDIOSlot0::ReadHCRegister(const IOCtlRequest& request)
 
   // Just reading the register
   Memory::Write_U32(val, request.buffer_out);
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
-IPCCommandResult SDIOSlot0::ResetCard(const IOCtlRequest& request)
+IPCReply SDIOSlot0Device::ResetCard(const IOCtlRequest& request)
 {
   INFO_LOG_FMT(IOS_SD, "IOCTL_RESETCARD");
 
   // Returns 16bit RCA and 16bit 0s (meaning success)
   Memory::Write_U32(m_status, request.buffer_out);
 
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
-IPCCommandResult SDIOSlot0::SetClk(const IOCtlRequest& request)
+IPCReply SDIOSlot0Device::SetClk(const IOCtlRequest& request)
 {
   INFO_LOG_FMT(IOS_SD, "IOCTL_SETCLK");
 
@@ -395,10 +422,10 @@ IPCCommandResult SDIOSlot0::SetClk(const IOCtlRequest& request)
   if (clock != 1)
     INFO_LOG_FMT(IOS_SD, "Setting to {}, interesting", clock);
 
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
-IPCCommandResult SDIOSlot0::SendCommand(const IOCtlRequest& request)
+std::optional<IPCReply> SDIOSlot0Device::SendCommand(const IOCtlRequest& request)
 {
   INFO_LOG_FMT(IOS_SD, "IOCTL_SENDCMD {:x} IPC:{:08x}", Memory::Read_U32(request.buffer_in),
                request.address);
@@ -410,13 +437,13 @@ IPCCommandResult SDIOSlot0::SendCommand(const IOCtlRequest& request)
   {
     // Check if the condition is already true
     EventNotify();
-    return GetNoReply();
+    return std::nullopt;
   }
 
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
-IPCCommandResult SDIOSlot0::GetStatus(const IOCtlRequest& request)
+IPCReply SDIOSlot0Device::GetStatus(const IOCtlRequest& request)
 {
   // Since IOS does the SD initialization itself, we just say we're always initialized.
   if (m_card)
@@ -441,8 +468,8 @@ IPCCommandResult SDIOSlot0::GetStatus(const IOCtlRequest& request)
 
   // Evaluate whether a card is currently inserted (config value).
   // Make sure we don't modify m_status so we don't lose track of whether the card is SDHC.
-  const u32 status =
-      SConfig::GetInstance().m_WiiSDCard ? (m_status | CARD_INSERTED) : CARD_NOT_EXIST;
+  const bool sd_card_inserted = Config::Get(Config::MAIN_WII_SD_CARD);
+  const u32 status = sd_card_inserted ? (m_status | CARD_INSERTED) : CARD_NOT_EXIST;
 
   INFO_LOG_FMT(IOS_SD, "IOCTL_GETSTATUS. Replying that {} card is {}{}",
                (status & CARD_SDHC) ? "SDHC" : "SD",
@@ -450,19 +477,19 @@ IPCCommandResult SDIOSlot0::GetStatus(const IOCtlRequest& request)
                (status & CARD_INITIALIZED) ? " and initialized" : "");
 
   Memory::Write_U32(status, request.buffer_out);
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
-IPCCommandResult SDIOSlot0::GetOCRegister(const IOCtlRequest& request)
+IPCReply SDIOSlot0Device::GetOCRegister(const IOCtlRequest& request)
 {
   const u32 ocr = GetOCRegister();
   INFO_LOG_FMT(IOS_SD, "IOCTL_GETOCR. Replying with ocr {:x}", ocr);
   Memory::Write_U32(ocr, request.buffer_out);
 
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
-IPCCommandResult SDIOSlot0::SendCommand(const IOCtlVRequest& request)
+IPCReply SDIOSlot0Device::SendCommand(const IOCtlVRequest& request)
 {
   DEBUG_LOG_FMT(IOS_SD, "IOCTLV_SENDCMD {:#010x}", Memory::Read_U32(request.in_vectors[0].address));
   Memory::Memset(request.io_vectors[0].address, 0, request.io_vectors[0].size);
@@ -472,10 +499,10 @@ IPCCommandResult SDIOSlot0::SendCommand(const IOCtlVRequest& request)
                      request.in_vectors[1].address, request.in_vectors[1].size,
                      request.io_vectors[0].address, request.io_vectors[0].size);
 
-  return GetDefaultReply(return_value);
+  return IPCReply(return_value);
 }
 
-u32 SDIOSlot0::GetOCRegister() const
+u32 SDIOSlot0Device::GetOCRegister() const
 {
   u32 ocr = 0x00ff8000;
   if (m_status & CARD_INITIALIZED)
@@ -485,7 +512,7 @@ u32 SDIOSlot0::GetOCRegister() const
   return ocr;
 }
 
-std::array<u32, 4> SDIOSlot0::GetCSDv1() const
+std::array<u32, 4> SDIOSlot0Device::GetCSDv1() const
 {
   u64 size = m_card.GetSize();
 
@@ -569,7 +596,7 @@ std::array<u32, 4> SDIOSlot0::GetCSDv1() const
   }};
 }
 
-std::array<u32, 4> SDIOSlot0::GetCSDv2() const
+std::array<u32, 4> SDIOSlot0Device::GetCSDv2() const
 {
   const u64 size = m_card.GetSize();
 
@@ -626,7 +653,7 @@ std::array<u32, 4> SDIOSlot0::GetCSDv2() const
   }};
 }
 
-u64 SDIOSlot0::GetAddressFromRequest(u32 arg) const
+u64 SDIOSlot0Device::GetAddressFromRequest(u32 arg) const
 {
   u64 address(arg);
   if (m_status & CARD_SDHC)
@@ -634,10 +661,10 @@ u64 SDIOSlot0::GetAddressFromRequest(u32 arg) const
   return address;
 }
 
-void SDIOSlot0::InitSDHC()
+void SDIOSlot0Device::InitSDHC()
 {
   m_protocol = SDProtocol::V2;
   m_status |= CARD_INITIALIZED;
 }
 
-}  // namespace IOS::HLE::Device
+}  // namespace IOS::HLE

@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Common/Assert.h"
 #include "Common/Logging/Log.h"
@@ -58,6 +57,10 @@ bool CEXIETHERNET::XLinkNetworkInterface::Activate()
 
 void CEXIETHERNET::XLinkNetworkInterface::Deactivate()
 {
+  // Is the BBA Active? If not skip shutdown
+  if (!IsActivated())
+    return;
+
   // Send d; to tell XLink we want to disconnect cleanly
   // disconnect;optional_locally_unique_name;optional_padding
   std::string cmd =
@@ -144,7 +147,7 @@ void CEXIETHERNET::XLinkNetworkInterface::ReadThreadHandler(
     if (!self->IsActivated())
       break;
 
-    // XLink supports jumboframes but Gamecube BBA does not. We need to support jumbo frames
+    // XLink supports jumboframes but GameCube BBA does not. We need to support jumbo frames
     // *here* because XLink *could* send one
     std::size_t bytes_read = 0;
     if (self->m_sf_socket.receive(self->m_in_frame, std::size(self->m_in_frame), bytes_read, sender,

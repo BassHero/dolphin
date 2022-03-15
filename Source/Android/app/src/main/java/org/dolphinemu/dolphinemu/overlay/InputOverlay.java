@@ -1,7 +1,6 @@
 /*
  * Copyright 2013 Dolphin Emulator Project
- * Licensed under GPLv2+
- * Refer to the license.txt file included.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 package org.dolphinemu.dolphinemu.overlay;
@@ -165,7 +164,9 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
       doubleTapButton = InputOverlayPointer.DOUBLE_TAP_A;
     }
 
-    overlayPointer = new InputOverlayPointer(mSurfacePosition, doubleTapButton);
+    overlayPointer = new InputOverlayPointer(mSurfacePosition, doubleTapButton,
+            IntSetting.MAIN_IR_MODE.getIntGlobal(),
+            BooleanSetting.MAIN_IR_ALWAYS_RECENTER.getBooleanGlobal());
   }
 
   @Override
@@ -770,6 +771,15 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
     invalidate();
   }
 
+  public void refreshOverlayPointer(Settings settings)
+  {
+    if (overlayPointer != null)
+    {
+      overlayPointer.setMode(IntSetting.MAIN_IR_MODE.getInt(settings));
+      overlayPointer.setRecenter(BooleanSetting.MAIN_IR_ALWAYS_RECENTER.getBoolean(settings));
+    }
+  }
+
   public void resetButtonPlacement()
   {
     boolean isLandscape =
@@ -955,6 +965,7 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
 
     // Need to set the image's position
     overlayDrawable.setPosition(drawableX, drawableY);
+    overlayDrawable.setOpacity(IntSetting.MAIN_CONTROL_OPACITY.getIntGlobal() * 255 / 100);
 
     return overlayDrawable;
   }
@@ -1039,6 +1050,7 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
 
     // Need to set the image's position
     overlayDrawable.setPosition(drawableX, drawableY);
+    overlayDrawable.setOpacity(IntSetting.MAIN_CONTROL_OPACITY.getIntGlobal() * 255 / 100);
 
     return overlayDrawable;
   }
@@ -1104,6 +1116,7 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
 
     // Need to set the image's position
     overlayDrawable.setPosition(drawableX, drawableY);
+    overlayDrawable.setOpacity(IntSetting.MAIN_CONTROL_OPACITY.getIntGlobal() * 255 / 100);
 
     return overlayDrawable;
   }

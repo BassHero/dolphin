@@ -1,6 +1,5 @@
 // Copyright 2017 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/IOS/USB/Host.h"
 
@@ -20,12 +19,12 @@
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
 #include "Common/Thread.h"
-#include "Core/ConfigManager.h"
+#include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/IOS/USB/Common.h"
 #include "Core/IOS/USB/LibusbDevice.h"
 
-namespace IOS::HLE::Device
+namespace IOS::HLE
 {
 USBHost::USBHost(Kernel& ios, const std::string& device_name) : Device(ios, device_name)
 {
@@ -33,7 +32,7 @@ USBHost::USBHost(Kernel& ios, const std::string& device_name) : Device(ios, devi
 
 USBHost::~USBHost() = default;
 
-IPCCommandResult USBHost::Open(const OpenRequest& request)
+std::optional<IPCReply> USBHost::Open(const OpenRequest& request)
 {
   if (!m_has_initialised && !Core::WantsDeterminism())
   {
@@ -43,7 +42,7 @@ IPCCommandResult USBHost::Open(const OpenRequest& request)
     GetScanThread().WaitForFirstScan();
     m_has_initialised = true;
   }
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
 void USBHost::UpdateWantDeterminism(const bool new_want_determinism)
@@ -66,7 +65,7 @@ void USBHost::DoState(PointerWrap& p)
 
 bool USBHost::AddDevice(std::unique_ptr<USB::Device> device)
 {
-  std::lock_guard<std::mutex> lk(m_devices_mutex);
+  std::lock_guard lk(m_devices_mutex);
   if (m_devices.find(device->GetId()) != m_devices.end())
     return false;
 
@@ -76,7 +75,7 @@ bool USBHost::AddDevice(std::unique_ptr<USB::Device> device)
 
 std::shared_ptr<USB::Device> USBHost::GetDeviceById(const u64 device_id) const
 {
-  std::lock_guard<std::mutex> lk(m_devices_mutex);
+  std::lock_guard lk(m_devices_mutex);
   const auto it = m_devices.find(device_id);
   if (it == m_devices.end())
     return nullptr;
@@ -116,7 +115,8 @@ bool USBHost::AddNewDevices(std::set<u64>& new_devices, DeviceChangeHooks& hooks
                             const bool always_add_hooks)
 {
 #ifdef __LIBUSB__
-  if (SConfig::GetInstance().m_usb_passthrough_devices.empty())
+  auto whitelist = Config::GetUSBDeviceWhitelist();
+  if (whitelist.empty())
     return true;
 
   if (m_context.IsValid())
@@ -124,8 +124,7 @@ bool USBHost::AddNewDevices(std::set<u64>& new_devices, DeviceChangeHooks& hooks
     m_context.GetDeviceList([&](libusb_device* device) {
       libusb_device_descriptor descriptor;
       libusb_get_device_descriptor(device, &descriptor);
-      const std::pair<u16, u16> vid_pid = {descriptor.idVendor, descriptor.idProduct};
-      if (!SConfig::GetInstance().IsUSBDeviceWhitelisted(vid_pid))
+      if (whitelist.count({descriptor.idVendor, descriptor.idProduct}) == 0)
         return true;
 
       auto usb_device = std::make_unique<USB::LibusbDevice>(m_ios, device, descriptor);
@@ -145,7 +144,7 @@ bool USBHost::AddNewDevices(std::set<u64>& new_devices, DeviceChangeHooks& hooks
 
 void USBHost::DetectRemovedDevices(const std::set<u64>& plugged_devices, DeviceChangeHooks& hooks)
 {
-  std::lock_guard<std::mutex> lk(m_devices_mutex);
+  std::lock_guard lk(m_devices_mutex);
   for (auto it = m_devices.begin(); it != m_devices.end();)
   {
     if (plugged_devices.find(it->second->GetId()) == plugged_devices.end())
@@ -213,18 +212,18 @@ void USBHost::ScanThread::Stop()
   m_host->DispatchHooks(hooks);
 }
 
-IPCCommandResult USBHost::HandleTransfer(std::shared_ptr<USB::Device> device, u32 request,
-                                         std::function<s32()> submit) const
+std::optional<IPCReply> USBHost::HandleTransfer(std::shared_ptr<USB::Device> device, u32 request,
+                                                std::function<s32()> submit) const
 {
   if (!device)
-    return GetDefaultReply(IPC_ENOENT);
+    return IPCReply(IPC_ENOENT);
 
   const s32 ret = submit();
   if (ret == IPC_SUCCESS)
-    return GetNoReply();
+    return std::nullopt;
 
   ERROR_LOG_FMT(IOS_USB, "[{:04x}:{:04x}] Failed to submit transfer (request {}): {}",
                 device->GetVid(), device->GetPid(), request, device->GetErrorName(ret));
-  return GetDefaultReply(ret <= 0 ? ret : IPC_EINVAL);
+  return IPCReply(ret <= 0 ? ret : IPC_EINVAL);
 }
-}  // namespace IOS::HLE::Device
+}  // namespace IOS::HLE

@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/Boot/Boot.h"
 
@@ -21,15 +20,14 @@ namespace fs = std::filesystem;
 #include <utility>
 #include <vector>
 
-#include <zlib.h>
-
 #include "Common/Align.h"
 #include "Common/CDUtils.h"
 #include "Common/CommonPaths.h"
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
-#include "Common/File.h"
 #include "Common/FileUtil.h"
+#include "Common/Hash.h"
+#include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 #include "Common/StringUtil.h"
@@ -58,6 +56,9 @@ namespace fs = std::filesystem;
 #include "Core/PowerPC/PowerPC.h"
 
 #include "DiscIO/Enums.h"
+#include "DiscIO/GameModDescriptor.h"
+#include "DiscIO/RiivolutionParser.h"
+#include "DiscIO/RiivolutionPatcher.h"
 #include "DiscIO/VolumeDisc.h"
 #include "DiscIO/VolumeWad.h"
 
@@ -111,22 +112,84 @@ static std::vector<std::string> ReadM3UFile(const std::string& m3u_path,
   return result;
 }
 
-BootParameters::BootParameters(Parameters&& parameters_,
-                               const std::optional<std::string>& savestate_path_)
-    : parameters(std::move(parameters_)), savestate_path(savestate_path_)
+BootSessionData::BootSessionData()
 {
 }
 
-std::unique_ptr<BootParameters>
-BootParameters::GenerateFromFile(std::string boot_path,
-                                 const std::optional<std::string>& savestate_path)
+BootSessionData::BootSessionData(std::optional<std::string> savestate_path,
+                                 DeleteSavestateAfterBoot delete_savestate)
+    : m_savestate_path(std::move(savestate_path)), m_delete_savestate(delete_savestate)
 {
-  return GenerateFromFile(std::vector<std::string>{std::move(boot_path)}, savestate_path);
 }
 
-std::unique_ptr<BootParameters>
-BootParameters::GenerateFromFile(std::vector<std::string> paths,
-                                 const std::optional<std::string>& savestate_path)
+BootSessionData::BootSessionData(BootSessionData&& other) = default;
+
+BootSessionData& BootSessionData::operator=(BootSessionData&& other) = default;
+
+BootSessionData::~BootSessionData() = default;
+
+const std::optional<std::string>& BootSessionData::GetSavestatePath() const
+{
+  return m_savestate_path;
+}
+
+DeleteSavestateAfterBoot BootSessionData::GetDeleteSavestate() const
+{
+  return m_delete_savestate;
+}
+
+void BootSessionData::SetSavestateData(std::optional<std::string> savestate_path,
+                                       DeleteSavestateAfterBoot delete_savestate)
+{
+  m_savestate_path = std::move(savestate_path);
+  m_delete_savestate = delete_savestate;
+}
+
+IOS::HLE::FS::FileSystem* BootSessionData::GetWiiSyncFS() const
+{
+  return m_wii_sync_fs.get();
+}
+
+const std::vector<u64>& BootSessionData::GetWiiSyncTitles() const
+{
+  return m_wii_sync_titles;
+}
+
+const std::string& BootSessionData::GetWiiSyncRedirectFolder() const
+{
+  return m_wii_sync_redirect_folder;
+}
+
+void BootSessionData::InvokeWiiSyncCleanup() const
+{
+  if (m_wii_sync_cleanup)
+    m_wii_sync_cleanup();
+}
+
+void BootSessionData::SetWiiSyncData(std::unique_ptr<IOS::HLE::FS::FileSystem> fs,
+                                     std::vector<u64> titles, std::string redirect_folder,
+                                     WiiSyncCleanupFunction cleanup)
+{
+  m_wii_sync_fs = std::move(fs);
+  m_wii_sync_titles = std::move(titles);
+  m_wii_sync_redirect_folder = std::move(redirect_folder);
+  m_wii_sync_cleanup = std::move(cleanup);
+}
+
+BootParameters::BootParameters(Parameters&& parameters_, BootSessionData boot_session_data_)
+    : parameters(std::move(parameters_)), boot_session_data(std::move(boot_session_data_))
+{
+}
+
+std::unique_ptr<BootParameters> BootParameters::GenerateFromFile(std::string boot_path,
+                                                                 BootSessionData boot_session_data_)
+{
+  return GenerateFromFile(std::vector<std::string>{std::move(boot_path)},
+                          std::move(boot_session_data_));
+}
+
+std::unique_ptr<BootParameters> BootParameters::GenerateFromFile(std::vector<std::string> paths,
+                                                                 BootSessionData boot_session_data_)
 {
   ASSERT(!paths.empty());
 
@@ -142,7 +205,7 @@ BootParameters::GenerateFromFile(std::vector<std::string> paths,
   std::string folder_path;
   std::string extension;
   SplitPath(paths.front(), &folder_path, nullptr, &extension);
-  std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
+  Common::ToLower(&extension);
 
   if (extension == ".m3u" || extension == ".m3u8")
   {
@@ -151,12 +214,21 @@ BootParameters::GenerateFromFile(std::vector<std::string> paths,
       return {};
 
     SplitPath(paths.front(), nullptr, nullptr, &extension);
-    std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
+    Common::ToLower(&extension);
   }
 
   std::string path = paths.front();
   if (paths.size() == 1)
     paths.clear();
+
+#ifdef ANDROID
+  if (extension.empty() && IsPathAndroidContent(path))
+  {
+    const std::string display_name = GetAndroidContentDisplayName(path);
+    SplitPath(display_name, nullptr, nullptr, &extension);
+    Common::ToLower(&extension);
+  }
+#endif
 
   static const std::unordered_set<std::string> disc_image_extensions = {
       {".gcm", ".iso", ".tgc", ".wbfs", ".ciso", ".gcz", ".wia", ".rvz", ".dol", ".elf"}};
@@ -166,21 +238,21 @@ BootParameters::GenerateFromFile(std::vector<std::string> paths,
     if (disc)
     {
       return std::make_unique<BootParameters>(Disc{std::move(path), std::move(disc), paths},
-                                              savestate_path);
+                                              std::move(boot_session_data_));
     }
 
     if (extension == ".elf")
     {
       auto elf_reader = std::make_unique<ElfReader>(path);
       return std::make_unique<BootParameters>(Executable{std::move(path), std::move(elf_reader)},
-                                              savestate_path);
+                                              std::move(boot_session_data_));
     }
 
     if (extension == ".dol")
     {
       auto dol_reader = std::make_unique<DolReader>(path);
       return std::make_unique<BootParameters>(Executable{std::move(path), std::move(dol_reader)},
-                                              savestate_path);
+                                              std::move(boot_session_data_));
     }
 
     if (is_drive)
@@ -199,13 +271,38 @@ BootParameters::GenerateFromFile(std::vector<std::string> paths,
   }
 
   if (extension == ".dff")
-    return std::make_unique<BootParameters>(DFF{std::move(path)}, savestate_path);
+    return std::make_unique<BootParameters>(DFF{std::move(path)}, std::move(boot_session_data_));
 
   if (extension == ".wad")
   {
     std::unique_ptr<DiscIO::VolumeWAD> wad = DiscIO::CreateWAD(std::move(path));
     if (wad)
-      return std::make_unique<BootParameters>(std::move(*wad), savestate_path);
+      return std::make_unique<BootParameters>(std::move(*wad), std::move(boot_session_data_));
+  }
+
+  if (extension == ".json")
+  {
+    auto descriptor = DiscIO::ParseGameModDescriptorFile(path);
+    if (descriptor)
+    {
+      auto boot_params = GenerateFromFile(descriptor->base_file, std::move(boot_session_data_));
+      if (!boot_params)
+      {
+        PanicAlertFmtT("Could not recognize file {0}", descriptor->base_file);
+        return nullptr;
+      }
+
+      if (descriptor->riivolution && std::holds_alternative<Disc>(boot_params->parameters))
+      {
+        const auto& volume = *std::get<Disc>(boot_params->parameters).volume;
+        AddRiivolutionPatches(boot_params.get(),
+                              DiscIO::Riivolution::GenerateRiivolutionPatchesFromGameModDescriptor(
+                                  *descriptor->riivolution, volume.GetGameID(),
+                                  volume.GetRevision(), volume.GetDiscNumber()));
+      }
+
+      return boot_params;
+    }
   }
 
   PanicAlertFmtT("Could not recognize file {0}", path);
@@ -265,24 +362,17 @@ void CBoot::UpdateDebugger_MapLoaded()
 bool CBoot::FindMapFile(std::string* existing_map_file, std::string* writable_map_file)
 {
   const std::string& game_id = SConfig::GetInstance().m_debugger_game_id;
+  std::string path = File::GetUserPath(D_MAPS_IDX) + game_id + ".map";
 
   if (writable_map_file)
-    *writable_map_file = File::GetUserPath(D_MAPS_IDX) + game_id + ".map";
+    *writable_map_file = path;
 
-  static const std::array<std::string, 2> maps_directories{
-      File::GetUserPath(D_MAPS_IDX),
-      File::GetSysDirectory() + MAPS_DIR DIR_SEP,
-  };
-  for (const auto& directory : maps_directories)
+  if (File::Exists(path))
   {
-    std::string path = directory + game_id + ".map";
-    if (File::Exists(path))
-    {
-      if (existing_map_file)
-        *existing_map_file = std::move(path);
+    if (existing_map_file)
+      *existing_map_file = std::move(path);
 
-      return true;
-    }
+    return true;
   }
 
   return false;
@@ -319,9 +409,7 @@ bool CBoot::Load_BS2(const std::string& boot_rom_filename)
   if (!File::ReadFileToString(boot_rom_filename, data))
     return false;
 
-  // Use zlibs crc32 implementation to compute the hash
-  u32 ipl_hash = crc32(0L, Z_NULL, 0);
-  ipl_hash = crc32(ipl_hash, (const Bytef*)data.data(), (u32)data.size());
+  const u32 ipl_hash = Common::ComputeCRC32(data);
   bool known_ipl = false;
   bool pal_ipl = false;
   switch (ipl_hash)
@@ -414,7 +502,10 @@ bool CBoot::BootUp(std::unique_ptr<BootParameters> boot)
 
   struct BootTitle
   {
-    BootTitle() : config(SConfig::GetInstance()) {}
+    BootTitle(const std::vector<DiscIO::Riivolution::Patch>& patches)
+        : config(SConfig::GetInstance()), riivolution_patches(patches)
+    {
+    }
     bool operator()(BootParameters::Disc& disc) const
     {
       NOTICE_LOG_FMT(BOOT, "Booting from disc: {}", disc.path);
@@ -424,14 +515,10 @@ bool CBoot::BootUp(std::unique_ptr<BootParameters> boot)
       if (!volume)
         return false;
 
-      if (!EmulatedBS2(config.bWii, *volume))
+      if (!EmulatedBS2(config.bWii, *volume, riivolution_patches))
         return false;
 
-      // Try to load the symbol map if there is one, and then scan it for
-      // and eventually replace code
-      if (LoadMapFromFilename())
-        HLE::PatchFunctions();
-
+      SConfig::OnNewTitleLoad();
       return true;
     }
 
@@ -473,9 +560,11 @@ bool CBoot::BootUp(std::unique_ptr<BootParameters> boot)
         SetupGCMemory();
       }
 
+      SConfig::OnNewTitleLoad();
+
       PC = executable.reader->GetEntryPoint();
 
-      if (executable.reader->LoadSymbols() || LoadMapFromFilename())
+      if (executable.reader->LoadSymbols())
       {
         UpdateDebugger_MapLoaded();
         HLE::PatchFunctions();
@@ -486,13 +575,21 @@ bool CBoot::BootUp(std::unique_ptr<BootParameters> boot)
     bool operator()(const DiscIO::VolumeWAD& wad) const
     {
       SetDefaultDisc();
-      return Boot_WiiWAD(wad);
+      if (!Boot_WiiWAD(wad))
+        return false;
+
+      SConfig::OnNewTitleLoad();
+      return true;
     }
 
     bool operator()(const BootParameters::NANDTitle& nand_title) const
     {
       SetDefaultDisc();
-      return BootNANDTitle(nand_title.id);
+      if (!BootNANDTitle(nand_title.id))
+        return false;
+
+      SConfig::OnNewTitleLoad();
+      return true;
     }
 
     bool operator()(const BootParameters::IPL& ipl) const
@@ -516,9 +613,7 @@ bool CBoot::BootUp(std::unique_ptr<BootParameters> boot)
         SetDisc(DiscIO::CreateDisc(ipl.disc->path), ipl.disc->auto_disc_change_paths);
       }
 
-      if (LoadMapFromFilename())
-        HLE::PatchFunctions();
-
+      SConfig::OnNewTitleLoad();
       return true;
     }
 
@@ -530,13 +625,14 @@ bool CBoot::BootUp(std::unique_ptr<BootParameters> boot)
 
   private:
     const SConfig& config;
+    const std::vector<DiscIO::Riivolution::Patch>& riivolution_patches;
   };
 
-  if (!std::visit(BootTitle(), boot->parameters))
+  if (!std::visit(BootTitle(boot->riivolution_patches), boot->parameters))
     return false;
 
-  PatchEngine::LoadPatches();
-  HLE::PatchFixedFunctions();
+  DiscIO::Riivolution::ApplyGeneralMemoryPatches(boot->riivolution_patches);
+
   return true;
 }
 
@@ -547,7 +643,7 @@ BootExecutableReader::BootExecutableReader(const std::string& file_name)
 
 BootExecutableReader::BootExecutableReader(File::IOFile file)
 {
-  file.Seek(0, SEEK_SET);
+  file.Seek(0, File::SeekOrigin::Begin);
   m_bytes.resize(file.GetSize());
   file.ReadBytes(m_bytes.data(), m_bytes.size());
 }
@@ -593,4 +689,21 @@ void CreateSystemMenuTitleDirs()
 {
   const auto es = IOS::HLE::GetIOS()->GetES();
   es->CreateTitleDirectories(Titles::SYSTEM_MENU, IOS::SYSMENU_GID);
+}
+
+void AddRiivolutionPatches(BootParameters* boot_params,
+                           std::vector<DiscIO::Riivolution::Patch> riivolution_patches)
+{
+  if (riivolution_patches.empty())
+    return;
+  if (!std::holds_alternative<BootParameters::Disc>(boot_params->parameters))
+    return;
+
+  auto& disc = std::get<BootParameters::Disc>(boot_params->parameters);
+  disc.volume = DiscIO::CreateDisc(DiscIO::DirectoryBlobReader::Create(
+      std::move(disc.volume),
+      [&](std::vector<DiscIO::FSTBuilderNode>* fst, DiscIO::FSTBuilderNode* dol_node) {
+        DiscIO::Riivolution::ApplyPatchesToFiles(riivolution_patches, fst, dol_node);
+      }));
+  boot_params->riivolution_patches = std::move(riivolution_patches);
 }

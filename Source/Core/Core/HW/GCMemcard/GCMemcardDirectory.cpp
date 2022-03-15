@@ -1,12 +1,10 @@
 // Copyright 2014 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/HW/GCMemcard/GCMemcardDirectory.h"
 
 #include <algorithm>
 #include <chrono>
-#include <cinttypes>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -17,11 +15,12 @@
 
 #include "Common/Assert.h"
 #include "Common/ChunkFile.h"
+#include "Common/CommonPaths.h"
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
-#include "Common/File.h"
 #include "Common/FileSearch.h"
 #include "Common/FileUtil.h"
+#include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 #include "Common/StringUtil.h"
@@ -29,9 +28,12 @@
 #include "Common/Timer.h"
 
 #include "Core/Config/MainSettings.h"
+#include "Core/Config/SessionSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
 #include "Core/HW/EXI/EXI_DeviceIPL.h"
+#include "Core/HW/GCMemcard/GCMemcard.h"
+#include "Core/HW/GCMemcard/GCMemcardUtils.h"
 #include "Core/HW/Sram.h"
 #include "Core/NetPlayProto.h"
 
@@ -150,7 +152,7 @@ std::vector<std::string> GCMemcardDirectory::GetFileNamesForGameID(const std::st
   return filenames;
 }
 
-GCMemcardDirectory::GCMemcardDirectory(const std::string& directory, int slot,
+GCMemcardDirectory::GCMemcardDirectory(const std::string& directory, ExpansionInterface::Slot slot,
                                        const Memcard::HeaderData& header_data, u32 game_id)
     : MemoryCardBase(slot, header_data.m_size_mb), m_game_id(game_id), m_last_block(-1),
       m_hdr(header_data), m_bat1(header_data.m_size_mb), m_saves(0), m_save_directory(directory),
@@ -161,7 +163,7 @@ GCMemcardDirectory::GCMemcardDirectory(const std::string& directory, int slot,
     File::IOFile((m_save_directory + MC_HDR), "rb").ReadBytes(&m_hdr, Memcard::BLOCK_SIZE);
   }
 
-  const bool current_game_only = Config::Get(Config::MAIN_GCI_FOLDER_CURRENT_GAME_ONLY);
+  const bool current_game_only = Config::Get(Config::SESSION_GCI_FOLDER_CURRENT_GAME_ONLY);
   std::vector<std::string> filenames = Common::DoFileSearch({m_save_directory}, {".gci"});
 
   // split up into files for current games we should definitely load,
@@ -200,8 +202,7 @@ GCMemcardDirectory::GCMemcardDirectory(const std::string& directory, int slot,
   }
 
   // leave about 10% of free space on the card if possible
-  const int total_blocks =
-      m_hdr.m_data.m_size_mb * Memcard::MBIT_TO_BLOCKS - Memcard::MC_FST_BLOCKS;
+  const int total_blocks = Memcard::MbitToFreeBlocks(m_hdr.m_data.m_size_mb);
   const int reserved_blocks = total_blocks / 10;
 
   // load files for other games
@@ -234,12 +235,12 @@ GCMemcardDirectory::GCMemcardDirectory(const std::string& directory, int slot,
 
 void GCMemcardDirectory::FlushThread()
 {
-  if (!SConfig::GetInstance().bEnableMemcardSdWriting)
+  if (!Config::Get(Config::SESSION_SAVE_DATA_WRITABLE))
   {
     return;
   }
 
-  Common::SetCurrentThreadName(fmt::format("Memcard {} flushing thread", m_card_index).c_str());
+  Common::SetCurrentThreadName(fmt::format("Memcard {} flushing thread", m_card_slot).c_str());
 
   constexpr std::chrono::seconds flush_interval{1};
   while (true)
@@ -328,7 +329,7 @@ s32 GCMemcardDirectory::Read(u32 src_address, s32 length, u8* dest_address)
 
 s32 GCMemcardDirectory::Write(u32 dest_address, s32 length, const u8* src_address)
 {
-  std::unique_lock<std::mutex> l(m_write_mutex);
+  std::unique_lock l(m_write_mutex);
   if (length != 0x80)
     INFO_LOG_FMT(EXPANSIONINTERFACE, "Writing to {:#x}. Length: {:#x}", dest_address, length);
   s32 block = dest_address / Memcard::BLOCK_SIZE;
@@ -593,7 +594,7 @@ bool GCMemcardDirectory::SetUsedBlocks(int save_index)
 
 void GCMemcardDirectory::FlushToFile()
 {
-  std::unique_lock<std::mutex> l(m_write_mutex);
+  std::unique_lock l(m_write_mutex);
   int errors = 0;
   Memcard::DEntry invalid;
   for (Memcard::GCIFile& save : m_saves)
@@ -686,7 +687,7 @@ void GCMemcardDirectory::FlushToFile()
 
 void GCMemcardDirectory::DoState(PointerWrap& p)
 {
-  std::unique_lock<std::mutex> l(m_write_mutex);
+  std::unique_lock l(m_write_mutex);
   m_last_block = -1;
   m_last_block_address = nullptr;
   p.Do(m_save_directory);
@@ -704,11 +705,10 @@ void GCMemcardDirectory::DoState(PointerWrap& p)
   }
 }
 
-void MigrateFromMemcardFile(const std::string& directory_name, int card_index)
+void MigrateFromMemcardFile(const std::string& directory_name, ExpansionInterface::Slot card_slot)
 {
   File::CreateFullPath(directory_name);
-  std::string ini_memcard = (card_index == 0) ? Config::Get(Config::MAIN_MEMCARD_A_PATH) :
-                                                Config::Get(Config::MAIN_MEMCARD_B_PATH);
+  std::string ini_memcard = Config::Get(Config::GetInfoForMemcardPath(card_slot));
   if (File::Exists(ini_memcard))
   {
     auto [error_code, memcard] = Memcard::GCMemcard::Open(ini_memcard.c_str());
@@ -716,7 +716,13 @@ void MigrateFromMemcardFile(const std::string& directory_name, int card_index)
     {
       for (u8 i = 0; i < Memcard::DIRLEN; i++)
       {
-        memcard->ExportGci(i, "", directory_name);
+        const auto savefile = memcard->ExportFile(i);
+        if (!savefile)
+          continue;
+
+        std::string filepath =
+            directory_name + DIR_SEP + Memcard::GenerateFilename(savefile->dir_entry) + ".gci";
+        Memcard::WriteSavefile(filepath, *savefile, Memcard::SavefileFormat::GCI);
       }
     }
   }

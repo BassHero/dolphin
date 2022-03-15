@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 package org.dolphinemu.dolphinemu.features.settings.model.view;
 
 import org.dolphinemu.dolphinemu.features.settings.model.AdHocBooleanSetting;
@@ -7,10 +9,10 @@ public class LogCheckBoxSetting extends CheckBoxSetting
 {
   String mKey;
 
-  public LogCheckBoxSetting(String key, int titleId, int descriptionId)
+  public LogCheckBoxSetting(String key, CharSequence title, CharSequence description)
   {
     super(new AdHocBooleanSetting(Settings.FILE_LOGGER, Settings.SECTION_LOGGER_LOGS, key, false),
-            titleId, descriptionId);
+            title, description);
     mKey = key;
   }
 

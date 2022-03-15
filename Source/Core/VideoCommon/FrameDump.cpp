@@ -1,6 +1,5 @@
 // Copyright 2009 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoCommon/FrameDump.h"
 
@@ -26,6 +25,7 @@ extern "C" {
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 
+#include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/HW/VideoInterface.h"
@@ -47,7 +47,7 @@ struct FrameDumpContext
   int width = 0;
   int height = 0;
 
-  u64 first_frame_ticks = 0;
+  u64 start_ticks = 0;
   u32 savestate_index = 0;
 
   bool gave_vfr_warning = false;
@@ -87,15 +87,15 @@ std::string GetDumpPath(const std::string& extension, std::time_t time, u32 inde
       File::GetUserPath(D_DUMPFRAMES_IDX) + SConfig::GetInstance().GetGameID();
 
   const std::string base_name =
-      fmt::format("{}_{:%Y-%m-%d_%H-%M-%S}_{}", path_prefix, *std::localtime(&time), index);
+      fmt::format("{}_{:%Y-%m-%d_%H-%M-%S}_{}", path_prefix, fmt::localtime(time), index);
 
   const std::string path = fmt::format("{}.{}", base_name, extension);
 
   // Ask to delete file.
   if (File::Exists(path))
   {
-    if (SConfig::GetInstance().m_DumpFramesSilent ||
-        AskYesNoT("Delete the existing file '%s'?", path.c_str()))
+    if (Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES_SILENT) ||
+        AskYesNoFmtT("Delete the existing file '{0}'?", path))
     {
       File::Delete(path);
     }
@@ -111,7 +111,7 @@ std::string GetDumpPath(const std::string& extension, std::time_t time, u32 inde
 
 }  // namespace
 
-bool FrameDump::Start(int w, int h)
+bool FrameDump::Start(int w, int h, u64 start_ticks)
 {
   if (IsStarted())
     return true;
@@ -120,15 +120,18 @@ bool FrameDump::Start(int w, int h)
   m_start_time = std::time(nullptr);
   m_file_index = 0;
 
-  return PrepareEncoding(w, h);
+  return PrepareEncoding(w, h, start_ticks, m_savestate_index);
 }
 
-bool FrameDump::PrepareEncoding(int w, int h)
+bool FrameDump::PrepareEncoding(int w, int h, u64 start_ticks, u32 savestate_index)
 {
   m_context = std::make_unique<FrameDumpContext>();
 
   m_context->width = w;
   m_context->height = h;
+
+  m_context->start_ticks = start_ticks;
+  m_context->savestate_index = savestate_index;
 
   InitAVCodec();
   const bool success = CreateVideoFile();
@@ -151,7 +154,7 @@ bool FrameDump::CreateVideoFile()
 
   File::CreateFullPath(dump_path);
 
-  AVOutputFormat* const output_format = av_guess_format(format.c_str(), dump_path.c_str(), nullptr);
+  auto* const output_format = av_guess_format(format.c_str(), dump_path.c_str(), nullptr);
   if (!output_format)
   {
     ERROR_LOG_FMT(FRAMEDUMP, "Invalid format {}", format);
@@ -279,14 +282,8 @@ void FrameDump::AddFrame(const FrameData& frame)
   if (!IsStarted())
     return;
 
-  if (IsFirstFrameInCurrentFile())
-  {
-    m_context->first_frame_ticks = frame.state.ticks;
-    m_context->savestate_index = frame.state.savestate_index;
-  }
-
-  // Calculate presentation timestamp from current ticks since first frame ticks.
-  const s64 pts = av_rescale_q(frame.state.ticks - m_context->first_frame_ticks,
+  // Calculate presentation timestamp from ticks since start.
+  const s64 pts = av_rescale_q(frame.state.ticks - m_context->start_ticks,
                                AVRational{1, int(SystemTimers::GetTicksPerSecond())},
                                m_context->codec->time_base);
 
@@ -300,7 +297,7 @@ void FrameDump::AddFrame(const FrameData& frame)
     else if (pts > m_context->last_pts + 1 && !m_context->gave_vfr_warning)
     {
       WARN_LOG_FMT(FRAMEDUMP, "PTS delta > 1. Resulting file will have variable frame rate. "
-                              "Subsequent occurances will not be reported.");
+                              "Subsequent occurrences will not be reported.");
       m_context->gave_vfr_warning = true;
     }
   }
@@ -337,12 +334,18 @@ void FrameDump::AddFrame(const FrameData& frame)
 
 void FrameDump::ProcessPackets()
 {
+  auto pkt = std::unique_ptr<AVPacket, std::function<void(AVPacket*)>>(
+      av_packet_alloc(), [](AVPacket* packet) { av_packet_free(&packet); });
+
+  if (!pkt)
+  {
+    ERROR_LOG_FMT(FRAMEDUMP, "Could not allocate packet");
+    return;
+  }
+
   while (true)
   {
-    AVPacket pkt;
-    av_init_packet(&pkt);
-
-    const int receive_error = avcodec_receive_packet(m_context->codec, &pkt);
+    const int receive_error = avcodec_receive_packet(m_context->codec, pkt.get());
 
     if (receive_error == AVERROR(EAGAIN) || receive_error == AVERROR_EOF)
     {
@@ -356,10 +359,10 @@ void FrameDump::ProcessPackets()
       break;
     }
 
-    av_packet_rescale_ts(&pkt, m_context->codec->time_base, m_context->stream->time_base);
-    pkt.stream_index = m_context->stream->index;
+    av_packet_rescale_ts(pkt.get(), m_context->codec->time_base, m_context->stream->time_base);
+    pkt->stream_index = m_context->stream->index;
 
-    if (const int write_error = av_interleaved_write_frame(m_context->format, &pkt))
+    if (const int write_error = av_interleaved_write_frame(m_context->format, pkt.get()))
     {
       ERROR_LOG_FMT(FRAMEDUMP, "Error writing packet: {}", write_error);
       break;
@@ -447,14 +450,15 @@ void FrameDump::CheckForConfigChange(const FrameData& frame)
   {
     Stop();
     ++m_file_index;
-    PrepareEncoding(frame.width, frame.height);
+    PrepareEncoding(frame.width, frame.height, frame.state.ticks, frame.state.savestate_index);
   }
 }
 
-FrameDump::FrameState FrameDump::FetchState(u64 ticks) const
+FrameDump::FrameState FrameDump::FetchState(u64 ticks, int frame_number) const
 {
   FrameState state;
   state.ticks = ticks;
+  state.frame_number = frame_number;
   state.savestate_index = m_savestate_index;
 
   const auto time_base = GetTimeBaseForCurrentRefreshRate();

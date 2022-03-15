@@ -1,6 +1,7 @@
 // Copyright 2014 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "UICommon/UICommon.h"
 
 #include <algorithm>
 #include <clocale>
@@ -36,10 +37,9 @@
 #include "InputCommon/GCAdapter.h"
 
 #include "UICommon/DiscordPresence.h"
-#include "UICommon/UICommon.h"
 #include "UICommon/USBUtils.h"
 
-#if defined(HAVE_XRANDR) && HAVE_XRANDR
+#ifdef HAVE_X11
 #include "UICommon/X11Utils.h"
 #endif
 
@@ -51,10 +51,10 @@
 
 namespace UICommon
 {
-static void CreateDumpPath(const std::string& path)
+static void CreateDumpPath(std::string path)
 {
   if (!path.empty())
-    File::SetUserPath(D_DUMP_IDX, path + '/');
+    File::SetUserPath(D_DUMP_IDX, std::move(path));
   File::CreateFullPath(File::GetUserPath(D_DUMPAUDIO_IDX));
   File::CreateFullPath(File::GetUserPath(D_DUMPDSP_IDX));
   File::CreateFullPath(File::GetUserPath(D_DUMPSSL_IDX));
@@ -63,17 +63,24 @@ static void CreateDumpPath(const std::string& path)
   File::CreateFullPath(File::GetUserPath(D_DUMPTEXTURES_IDX));
 }
 
-static void CreateLoadPath(const std::string& path)
+static void CreateLoadPath(std::string path)
 {
   if (!path.empty())
-    File::SetUserPath(D_LOAD_IDX, path + '/');
+    File::SetUserPath(D_LOAD_IDX, std::move(path));
   File::CreateFullPath(File::GetUserPath(D_HIRESTEXTURES_IDX));
+  File::CreateFullPath(File::GetUserPath(D_RIIVOLUTION_IDX));
 }
 
-static void CreateResourcePackPath(const std::string& path)
+static void CreateResourcePackPath(std::string path)
 {
   if (!path.empty())
-    File::SetUserPath(D_RESOURCEPACK_IDX, path + '/');
+    File::SetUserPath(D_RESOURCEPACK_IDX, std::move(path));
+}
+
+static void CreateWFSPath(const std::string& path)
+{
+  if (!path.empty())
+    File::SetUserPath(D_WFSROOT_IDX, path + '/');
 }
 
 static void InitCustomPaths()
@@ -82,9 +89,13 @@ static void InitCustomPaths()
   CreateLoadPath(Config::Get(Config::MAIN_LOAD_PATH));
   CreateDumpPath(Config::Get(Config::MAIN_DUMP_PATH));
   CreateResourcePackPath(Config::Get(Config::MAIN_RESOURCEPACK_PATH));
-  const std::string sd_path = Config::Get(Config::MAIN_SD_PATH);
-  if (!sd_path.empty())
-    File::SetUserPath(F_WIISDCARD_IDX, sd_path);
+  CreateWFSPath(Config::Get(Config::MAIN_WFS_PATH));
+  File::SetUserPath(F_WIISDCARD_IDX, Config::Get(Config::MAIN_SD_PATH));
+#ifdef HAS_LIBMGBA
+  File::SetUserPath(F_GBABIOS_IDX, Config::Get(Config::MAIN_GBA_BIOS_PATH));
+  File::SetUserPath(D_GBASAVES_IDX, Config::Get(Config::MAIN_GBA_SAVES_PATH));
+  File::CreateFullPath(File::GetUserPath(D_GBASAVES_IDX));
+#endif
 }
 
 void Init()
@@ -97,11 +108,10 @@ void Init()
   SConfig::Init();
   Discord::Init();
   Common::Log::LogManager::Init();
-  WiimoteReal::LoadSettings();
-  GCAdapter::Init();
   VideoBackendBase::ActivateBackend(Config::Get(Config::MAIN_GFX_BACKEND));
 
   Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
+  Common::SetAbortOnPanicAlert(Config::Get(Config::MAIN_ABORT_ON_PANIC_ALERT));
 }
 
 void Shutdown()
@@ -202,12 +212,12 @@ void CreateDirectories()
 #endif
 }
 
-void SetUserDirectory(const std::string& custom_path)
+void SetUserDirectory(std::string custom_path)
 {
   if (!custom_path.empty())
   {
     File::CreateFullPath(custom_path + DIR_SEP);
-    File::SetUserPath(D_USER_IDX, custom_path + DIR_SEP);
+    File::SetUserPath(D_USER_IDX, std::move(custom_path));
     return;
   }
 
@@ -271,15 +281,6 @@ void SetUserDirectory(const std::string& custom_path)
     user_path = File::GetExeDirectory() + DIR_SEP USERDATA_DIR DIR_SEP;
 
   CoTaskMemFree(my_documents);
-
-  // Prettify the path: it will be displayed in some places, we don't want a mix
-  // of \ and /.
-  user_path = ReplaceAll(std::move(user_path), "\\", DIR_SEP);
-
-  // Make sure it ends in DIR_SEP.
-  if (user_path.back() != DIR_SEP_CHR)
-    user_path += DIR_SEP;
-
 #else
   if (File::IsDirectory(ROOT_DIR DIR_SEP USERDATA_DIR))
   {
@@ -355,29 +356,6 @@ void SetUserDirectory(const std::string& custom_path)
   File::SetUserPath(D_USER_IDX, std::move(user_path));
 }
 
-void SaveWiimoteSources()
-{
-  std::string ini_filename = File::GetUserPath(D_CONFIG_IDX) + WIIMOTE_INI_NAME ".ini";
-
-  IniFile inifile;
-  inifile.Load(ini_filename);
-
-  for (unsigned int i = 0; i < MAX_WIIMOTES; ++i)
-  {
-    std::string secname("Wiimote");
-    secname += (char)('1' + i);
-    IniFile::Section& sec = *inifile.GetOrCreateSection(secname);
-
-    sec.Set("Source", int(WiimoteCommon::GetSource(i)));
-  }
-
-  std::string secname("BalanceBoard");
-  IniFile::Section& sec = *inifile.GetOrCreateSection(secname);
-  sec.Set("Source", int(WiimoteCommon::GetSource(WIIMOTE_BALANCE_BOARD)));
-
-  inifile.Save(ini_filename);
-}
-
 bool TriggerSTMPowerEvent()
 {
   const auto ios = IOS::HLE::GetIOS();
@@ -385,7 +363,7 @@ bool TriggerSTMPowerEvent()
     return false;
 
   const auto stm = ios->GetDeviceByName("/dev/stm/eventhook");
-  if (!stm || !std::static_pointer_cast<IOS::HLE::Device::STMEventHook>(stm)->HasHookInstalled())
+  if (!stm || !std::static_pointer_cast<IOS::HLE::STMEventHookDevice>(stm)->HasHookInstalled())
     return false;
 
   Core::DisplayMessage("Shutting down", 30000);
@@ -394,7 +372,7 @@ bool TriggerSTMPowerEvent()
   return true;
 }
 
-#if defined(HAVE_XRANDR) && HAVE_XRANDR
+#ifdef HAVE_X11
 void InhibitScreenSaver(Window win, bool inhibit)
 #else
 void InhibitScreenSaver(bool inhibit)
@@ -403,7 +381,7 @@ void InhibitScreenSaver(bool inhibit)
   // Inhibit the screensaver. Depending on the operating system this may also
   // disable low-power states and/or screen dimming.
 
-#if defined(HAVE_X11) && HAVE_X11
+#ifdef HAVE_X11
   X11Utils::InhibitScreensaver(win, inhibit);
 #endif
 
