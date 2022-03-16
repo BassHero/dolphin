@@ -515,7 +515,7 @@ void HiresTexture::ReThreeMaskHackInit()
 {
   reThreeHackTexMap.clear();
 
-  //                  BG Tex name hash  New Mask TLUT hash   Mask TLUT hash       
+  // BG Tex name hash  New Mask TLUT hash   Mask TLUT hash       
   reThreeHackTexMap["_20c67ecf1252aacb"] = {"_R11B01", "_e3c364c1425f893c"};
   reThreeHackTexMap["_54cfa79672366bd7"] = {"_R11B0A", "_e3c364c1425f893c"};
 

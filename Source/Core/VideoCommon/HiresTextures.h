@@ -46,6 +46,13 @@ public:
   };
   std::vector<Level> m_levels;
 
+  struct ReThreeMaskHackTlutToId
+  {
+    std::string id;
+    std::string tlut;
+    std::string tlut_alt;
+  };
+
 private:
   static std::unique_ptr<HiresTexture> Load(const std::string& base_filename, u32 width,
                                             u32 height);
@@ -56,4 +63,10 @@ private:
 
   HiresTexture() = default;
   bool m_has_arbitrary_mipmaps = false;
+
+  static void ReThreeMaskHack(const std::string& texname, std::string& tlutname, u32 width);
+  static void ReThreeMaskHackInit();
+
+  // static void ReThreeRoomIdOsd(const std::string& fullname, u32 width);
+  // static void ReThreeRoomIdOsdInit();
 };
