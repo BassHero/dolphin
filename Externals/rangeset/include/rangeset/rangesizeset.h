@@ -322,18 +322,17 @@ public:
     return get_from(it) <= value && value < get_to(it);
   }
 
-  size_t size() const {
+   std::size_t size() const {
     return Map.size();
-  }
+    }
 
   bool empty() const {
     return Map.empty();
   }
 
-  size_t by_size_count(const SizeT& key) const {
+  std::size_t by_size_count(const SizeT& key) const {
     return Sizes.count(key);
-  }
-
+}
   by_size_const_iterator by_size_find(const SizeT& key) const {
     return Sizes.find(key);
   }
